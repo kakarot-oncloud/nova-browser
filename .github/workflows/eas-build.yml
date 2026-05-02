@@ -6,6 +6,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     name: Build Android APK (Direct Gradle)
@@ -44,10 +47,43 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.1.12297006
 
-      - name: Upload APK
+      - name: Rename APK
+        run: |
+          mkdir -p release-artifacts
+          APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
+          echo "APK path: $APK"
+          cp "$APK" release-artifacts/nova-browser-v${{ github.run_number }}.apk
+          echo "APK_PATH=release-artifacts/nova-browser-v${{ github.run_number }}.apk" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Nova Browser v${{ github.run_number }}
+          body: |
+            ## Nova Browser APK
+
+            Built from commit `${{ github.sha }}` on ${{ github.event_name == 'workflow_dispatch' && 'manual trigger' || github.ref }}.
+
+            ### Install
+            1. Download the APK below
+            2. On your Android device: Settings → Security → Allow unknown sources
+            3. Open the APK and install
+
+            ### Features
+            - Multi-tab browsing
+            - Built-in ad blocker
+            - Userscript engine
+            - Proxy / User-Agent spoofing
+            - Downloads manager
+            - Extensions support
+          files: ${{ env.APK_PATH }}
+          make_latest: true
+
+      - name: Upload APK as artifact (backup)
         uses: actions/upload-artifact@v4
         with:
-          name: nova-browser-apk
-          path: android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+          name: nova-browser-apk-v${{ github.run_number }}
+          path: release-artifacts/*.apk
+          retention-days: 90
 
