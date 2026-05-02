@@ -1,5 +1,5 @@
 import * as Haptics from "expo-haptics";
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialIcons } from "@expo/vector-icons";
 import React, {
   useCallback,
   useEffect,
@@ -7,7 +7,6 @@ import React, {
   useState,
 } from "react";
 import {
-  Alert,
   BackHandler,
   Modal,
   Platform,
@@ -15,9 +14,17 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TouchableNativeFeedback,
   TouchableOpacity,
   View,
 } from "react-native";
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSequence,
+  interpolate,
+} from "react-native-reanimated";
 import WebView, { WebViewNavigation, WebViewMessageEvent } from "react-native-webview";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import FindInPage from "@/components/FindInPage";
@@ -25,7 +32,6 @@ import MenuSheet from "@/components/MenuSheet";
 import SpeedDial from "@/components/SpeedDial";
 import TabsSheet from "@/components/TabsSheet";
 import { useBrowser, Tab } from "@/contexts/BrowserContext";
-import { useBookmarks } from "@/contexts/BookmarksContext";
 import { useDownloads } from "@/contexts/DownloadsContext";
 import { useExtensions } from "@/contexts/ExtensionsContext";
 import { useHistory } from "@/contexts/HistoryContext";
@@ -48,9 +54,7 @@ import {
   buildWebRTCLeakPreventScript,
   ADBLOCK_SCRIPT,
 } from "@/services/spoofingScripts";
-
-const MOBILE_CHROME_UA =
-  "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36";
+import { categoryIcon, categoryColor, DownloadCategory } from "@/contexts/DownloadsContext";
 
 const DESKTOP_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -82,33 +86,53 @@ function buildInjectionScript(options: {
   effectiveUA: string;
 }): string {
   const parts: string[] = [DOWNLOAD_INTERCEPT_SCRIPT];
-
   if (options.adBlock) parts.push(ADBLOCK_SCRIPT);
-
   if (options.proxy) {
-    if (options.proxy.spoofLocation) {
-      parts.push(buildGeolocationScript(options.proxy.lat, options.proxy.lng));
-    }
-    if (options.proxy.autoTimezone && options.proxy.timezone) {
-      parts.push(buildTimezoneScript(options.proxy.timezone));
-    }
-    if (options.proxy.autoLanguage && options.proxy.language) {
-      parts.push(buildLanguageScript(options.proxy.language));
-    }
-    if (options.proxy.blockWebRTC) {
-      parts.push(buildWebRTCLeakPreventScript());
-    }
+    if (options.proxy.spoofLocation) parts.push(buildGeolocationScript(options.proxy.lat, options.proxy.lng));
+    if (options.proxy.autoTimezone && options.proxy.timezone) parts.push(buildTimezoneScript(options.proxy.timezone));
+    if (options.proxy.autoLanguage && options.proxy.language) parts.push(buildLanguageScript(options.proxy.language));
+    if (options.proxy.blockWebRTC) parts.push(buildWebRTCLeakPreventScript());
   }
-
-  if (options.effectiveUA) {
-    parts.push(buildUserAgentScript(options.effectiveUA));
-  }
-
-  if (options.extensionScript && options.extensionScript !== "true;") {
-    parts.push(options.extensionScript);
-  }
-
+  if (options.effectiveUA) parts.push(buildUserAgentScript(options.effectiveUA));
+  if (options.extensionScript && options.extensionScript !== "true;") parts.push(options.extensionScript);
   return parts.join("\n") + "\ntrue;";
+}
+
+function detectCategoryFromFilename(filename: string): DownloadCategory {
+  const ext = filename.split(".").pop()?.toLowerCase() || "";
+  if (/mp4|mkv|avi|mov|wmv|flv|webm|m4v|3gp/.test(ext)) return "video";
+  if (/mp3|aac|wav|flac|ogg|m4a|opus/.test(ext)) return "audio";
+  if (/pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv|epub/.test(ext)) return "document";
+  if (/jpg|jpeg|png|gif|webp|bmp|svg|heic/.test(ext)) return "image";
+  if (/zip|rar|7z|tar|gz/.test(ext)) return "archive";
+  if (ext === "apk") return "apk";
+  return "other";
+}
+
+function RippleBtn({ onPress, disabled, style, children }: {
+  onPress: () => void;
+  disabled?: boolean;
+  style?: any;
+  children: React.ReactNode;
+}) {
+  if (Platform.OS === "android") {
+    return (
+      <View style={[style, { borderRadius: 40, overflow: "hidden" }]}>
+        <TouchableNativeFeedback
+          onPress={onPress}
+          disabled={disabled}
+          background={TouchableNativeFeedback.Ripple("rgba(0,0,0,0.12)", true, 22)}
+        >
+          <View style={style}>{children}</View>
+        </TouchableNativeFeedback>
+      </View>
+    );
+  }
+  return (
+    <TouchableOpacity onPress={onPress} disabled={disabled} style={style} activeOpacity={0.6}>
+      {children}
+    </TouchableOpacity>
+  );
 }
 
 interface DownloadDialogProps {
@@ -122,87 +146,125 @@ interface DownloadDialogProps {
 
 function DownloadDialog({ visible, url, filename, referer, onConfirm, onCancel }: DownloadDialogProps) {
   const colors = useColors();
+  const insets = useSafeAreaInsets();
   const [name, setName] = useState(filename);
   const [threads, setThreads] = useState(4);
+  const slideY = useSharedValue(300);
 
   useEffect(() => {
     setName(filename);
     setThreads(4);
   }, [filename, url]);
 
-  const THREAD_OPTIONS = [1, 2, 4, 8];
+  useEffect(() => {
+    slideY.value = withTiming(visible ? 0 : 300, { duration: 280 });
+  }, [visible]);
+
+  const sheetStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: slideY.value }],
+  }));
+
+  const cat = detectCategoryFromFilename(filename);
+  const catColor = categoryColor(cat);
+  const catIco = categoryIcon(cat);
+
+  const THREAD_OPTIONS = [
+    { v: 1, label: "1×" },
+    { v: 2, label: "2×" },
+    { v: 4, label: "4×", rec: true },
+    { v: 8, label: "8×" },
+  ];
+
+  if (!visible) return null;
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+    <Modal visible={visible} transparent animationType="none" onRequestClose={onCancel} statusBarTranslucent>
       <Pressable style={styles.dlOverlay} onPress={onCancel}>
-        <Pressable style={[styles.dlSheet, { backgroundColor: colors.card }]} onPress={() => {}}>
-          {/* Handle */}
-          <View style={[styles.dlHandle, { backgroundColor: colors.muted }]} />
+        <Animated.View
+          style={[styles.dlSheet, { backgroundColor: colors.card, paddingBottom: insets.bottom + 16 }, sheetStyle]}
+        >
+          <Pressable onPress={() => {}}>
+            <View style={[styles.dlHandle, { backgroundColor: colors.border }]} />
 
-          <View style={styles.dlHeader}>
-            <Ionicons name="cloud-download-outline" size={24} color={colors.primary} />
-            <Text style={[styles.dlTitle, { color: colors.foreground }]}>Download File</Text>
-          </View>
-
-          {/* URL preview */}
-          <Text style={[styles.dlUrl, { color: colors.mutedForeground }]} numberOfLines={1}>
-            {url}
-          </Text>
-
-          {/* Filename */}
-          <Text style={[styles.dlLabel, { color: colors.mutedForeground }]}>File name</Text>
-          <TextInput
-            style={[styles.dlInput, { backgroundColor: colors.muted, color: colors.foreground, borderColor: colors.border }]}
-            value={name}
-            onChangeText={setName}
-            autoCapitalize="none"
-            autoCorrect={false}
-            selectTextOnFocus
-          />
-
-          {/* Thread selector */}
-          <Text style={[styles.dlLabel, { color: colors.mutedForeground }]}>Download threads</Text>
-          <View style={styles.dlThreadRow}>
-            {THREAD_OPTIONS.map((t) => (
-              <TouchableOpacity
-                key={t}
-                style={[
-                  styles.dlThreadBtn,
-                  {
-                    backgroundColor: threads === t ? colors.primary : colors.muted,
-                    borderColor: threads === t ? colors.primary : colors.border,
-                  },
-                ]}
-                onPress={() => setThreads(t)}
-              >
-                <Text style={[styles.dlThreadLabel, { color: threads === t ? "#fff" : colors.mutedForeground }]}>
-                  {t}x
+            {/* File type header */}
+            <View style={styles.dlHeaderRow}>
+              <View style={[styles.dlFileIcon, { backgroundColor: catColor + "20" }]}>
+                <Ionicons name={catIco as any} size={28} color={catColor} />
+              </View>
+              <View style={styles.dlHeaderText}>
+                <Text style={[styles.dlTitle, { color: colors.foreground }]} numberOfLines={1}>
+                  {filename || "File Download"}
                 </Text>
-                {t === 4 && (
-                  <Text style={[styles.dlThreadSub, { color: threads === t ? "#ffffff99" : colors.mutedForeground }]}>
-                    rec
-                  </Text>
-                )}
-              </TouchableOpacity>
-            ))}
-          </View>
+                <Text style={[styles.dlSubtitle, { color: colors.mutedForeground }]} numberOfLines={1}>
+                  {url.length > 50 ? url.substring(0, 50) + "…" : url}
+                </Text>
+              </View>
+            </View>
 
-          <View style={styles.dlActions}>
-            <TouchableOpacity
-              style={[styles.dlBtn, { backgroundColor: colors.muted }]}
-              onPress={onCancel}
-            >
-              <Text style={[styles.dlBtnText, { color: colors.foreground }]}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.dlBtn, { backgroundColor: colors.primary, flex: 1.5 }]}
-              onPress={() => onConfirm(name || filename, threads)}
-            >
-              <Ionicons name="download-outline" size={16} color="#fff" />
-              <Text style={[styles.dlBtnText, { color: "#fff" }]}>Download Now</Text>
-            </TouchableOpacity>
-          </View>
-        </Pressable>
+            {/* Filename input */}
+            <View style={styles.dlSection}>
+              <Text style={[styles.dlSectionLabel, { color: colors.mutedForeground }]}>FILE NAME</Text>
+              <TextInput
+                style={[styles.dlInput, { backgroundColor: colors.muted, color: colors.foreground, borderColor: colors.border }]}
+                value={name}
+                onChangeText={setName}
+                autoCapitalize="none"
+                autoCorrect={false}
+                selectTextOnFocus
+                placeholderTextColor={colors.mutedForeground}
+              />
+            </View>
+
+            {/* Thread selector */}
+            <View style={styles.dlSection}>
+              <Text style={[styles.dlSectionLabel, { color: colors.mutedForeground }]}>DOWNLOAD THREADS</Text>
+              <View style={[styles.dlSegment, { backgroundColor: colors.muted }]}>
+                {THREAD_OPTIONS.map((opt) => (
+                  <TouchableOpacity
+                    key={opt.v}
+                    style={[
+                      styles.dlSegmentBtn,
+                      threads === opt.v && { backgroundColor: colors.primary, shadowColor: colors.primary, shadowOffset: { width: 0, height: 2 }, shadowRadius: 4, shadowOpacity: 0.4, elevation: 3 },
+                    ]}
+                    onPress={() => { setThreads(opt.v); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={[styles.dlSegmentLabel, { color: threads === opt.v ? "#fff" : colors.mutedForeground }]}>
+                      {opt.label}
+                    </Text>
+                    {opt.rec && (
+                      <View style={[styles.dlRecBadge, { backgroundColor: threads === opt.v ? "#ffffff30" : colors.primary + "30" }]}>
+                        <Text style={[styles.dlRecText, { color: threads === opt.v ? "#fff" : colors.primary }]}>REC</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={[styles.dlThreadHint, { color: colors.mutedForeground }]}>
+                More threads = faster download on fast connections
+              </Text>
+            </View>
+
+            {/* Action buttons */}
+            <View style={styles.dlActions}>
+              <TouchableOpacity
+                style={[styles.dlCancelBtn, { backgroundColor: colors.muted }]}
+                onPress={onCancel}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.dlCancelText, { color: colors.foreground }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.dlConfirmBtn, { backgroundColor: colors.primary }]}
+                onPress={() => onConfirm(name || filename, threads)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="arrow-down-circle" size={18} color="#fff" />
+                <Text style={styles.dlConfirmText}>Download</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Animated.View>
       </Pressable>
     </Modal>
   );
@@ -224,7 +286,6 @@ function BrowserWebView({
   const { activeProxy, isActive: proxyActive, getEffectiveUserAgent } = useProxy();
   const colors = useColors();
   const webViewRef = useRef<WebView>(null);
-
   const isHome = !tab.url || tab.url === HOME_URL || tab.url === "about:blank";
 
   useEffect(() => {
@@ -240,31 +301,23 @@ function BrowserWebView({
 
   const injectedJS = useCallback(() => {
     const extensionScript = isHome ? "true;" : getInjectionScript(tab.url);
-    const proxyUA = proxyActive ? getEffectiveUserAgent() : "";
     return buildInjectionScript({
       adBlock: settings.adBlockEnabled && !isHome,
       extensionScript,
       proxy: proxyActive ? activeProxy : null,
       desktopMode: settings.desktopMode,
-      effectiveUA: proxyUA,
+      effectiveUA: proxyActive ? getEffectiveUserAgent() : "",
     });
   }, [tab.url, settings.adBlockEnabled, settings.desktopMode, getInjectionScript, proxyActive, activeProxy, getEffectiveUserAgent, isHome]);
 
-  const effectiveUA = settings.desktopMode
-    ? DESKTOP_UA
-    : proxyActive
-    ? getEffectiveUserAgent() || MOBILE_CHROME_UA
-    : MOBILE_CHROME_UA;
+  const userAgent = settings.desktopMode ? DESKTOP_UA : undefined;
 
   function handleMessage(e: WebViewMessageEvent) {
     try {
       const data = JSON.parse(e.nativeEvent.data);
-      if (data.type === "download") {
-        const dlUrl = data.url as string;
-        const dlFilename = (data.filename as string) || getFilenameFromUrl(dlUrl);
-        if (dlUrl) {
-          onDownloadRequest(dlUrl, dlFilename, tab.url);
-        }
+      if (data.type === "download" && data.url) {
+        const dlFilename = (data.filename as string) || getFilenameFromUrl(data.url as string);
+        onDownloadRequest(data.url as string, dlFilename, tab.url);
       }
     } catch {}
   }
@@ -272,10 +325,7 @@ function BrowserWebView({
   if (isHome) {
     return (
       <View
-        style={[
-          styles.webviewContainer,
-          { opacity: isActive ? 1 : 0, zIndex: isActive ? 1 : -1 },
-        ]}
+        style={[styles.webviewContainer, { opacity: isActive ? 1 : 0, zIndex: isActive ? 1 : -1 }]}
         pointerEvents={isActive ? "auto" : "none"}
       >
         <SpeedDial onSearch={() => {}} />
@@ -285,17 +335,13 @@ function BrowserWebView({
 
   return (
     <View
-      style={[
-        styles.webviewContainer,
-        { opacity: isActive ? 1 : 0, zIndex: isActive ? 1 : -1 },
-      ]}
+      style={[styles.webviewContainer, { opacity: isActive ? 1 : 0, zIndex: isActive ? 1 : -1 }]}
       pointerEvents={isActive ? "auto" : "none"}
     >
       <WebView
         ref={webViewRef}
         source={{ uri: tab.url }}
         style={styles.webview}
-        userAgent={effectiveUA}
         javaScriptEnabled={settings.javascriptEnabled}
         domStorageEnabled
         thirdPartyCookiesEnabled
@@ -308,6 +354,7 @@ function BrowserWebView({
         mediaPlaybackRequiresUserAction={false}
         setSupportMultipleWindows={false}
         javaScriptCanOpenWindowsAutomatically
+        userAgent={userAgent}
         injectedJavaScript={injectedJS()}
         onMessage={handleMessage}
         onNavigationStateChange={(state: WebViewNavigation) => {
@@ -323,9 +370,7 @@ function BrowserWebView({
           }
         }}
         onLoadStart={() => updateTab(tab.id, { isLoading: true, loadProgress: 0.05 })}
-        onLoadProgress={({ nativeEvent }) =>
-          updateTab(tab.id, { loadProgress: nativeEvent.progress })
-        }
+        onLoadProgress={({ nativeEvent }) => updateTab(tab.id, { loadProgress: nativeEvent.progress })}
         onLoadEnd={() => updateTab(tab.id, { isLoading: false, loadProgress: 1 })}
         onShouldStartLoadWithRequest={(request) => {
           if (isDownloadable(request.url)) {
@@ -337,9 +382,9 @@ function BrowserWebView({
         }}
         renderError={() => (
           <View style={[styles.errorView, { backgroundColor: colors.background }]}>
-            <Ionicons name="wifi-outline" size={56} color={colors.mutedForeground} />
-            <Text style={[styles.errorTitle, { color: colors.foreground }]}>Can't reach page</Text>
-            <Text style={[styles.errorSub, { color: colors.mutedForeground }]}>
+            <Ionicons name="cloud-offline-outline" size={64} color={colors.mutedForeground} />
+            <Text style={[styles.errorTitle, { color: colors.foreground }]}>Can't load page</Text>
+            <Text style={[styles.errorBody, { color: colors.mutedForeground }]}>
               Check your connection and try again
             </Text>
           </View>
@@ -350,15 +395,10 @@ function BrowserWebView({
 }
 
 export default function BrowserScreen() {
-  const {
-    tabs,
-    activeTabId,
-    activeTab,
-    navigateTo,
-    issueCommand,
-  } = useBrowser();
-  const { getSearchUrl } = useSettings();
-  const { startDownload, activeCount } = useDownloads();
+  const { tabs, activeTabId, activeTab, navigateTo, issueCommand } = useBrowser();
+  const { settings, updateSetting } = useSettings();
+  const { startDownload } = useDownloads();
+  const { isActive: proxyActive } = useProxy();
   const colors = useColors();
   const insets = useSafeAreaInsets();
 
@@ -376,6 +416,9 @@ export default function BrowserScreen() {
     referer: string;
   }>({ visible: false, url: "", filename: "", referer: "" });
 
+  const progressWidth = useSharedValue(0);
+  const progressOpacity = useSharedValue(0);
+
   const url = activeTab?.url ?? HOME_URL;
   const displayUrl = getDisplayUrl(url);
   const isHome = url === HOME_URL || url === "about:blank" || !url;
@@ -386,32 +429,42 @@ export default function BrowserScreen() {
   const isIncognito = activeTab?.isIncognito ?? false;
   const canGoBack = activeTab?.canGoBack ?? false;
   const canGoForward = activeTab?.canGoForward ?? false;
+  const isDesktop = settings.desktopMode;
+
+  useEffect(() => {
+    if (isLoading) {
+      progressOpacity.value = withTiming(1, { duration: 100 });
+      progressWidth.value = withTiming(progress, { duration: 200 });
+    } else {
+      progressWidth.value = withTiming(1, { duration: 200 });
+      progressOpacity.value = withTiming(0, { duration: 400 });
+    }
+  }, [isLoading, progress]);
+
+  const progressBarStyle = useAnimatedStyle(() => ({
+    width: `${progressWidth.value * 100}%` as any,
+    opacity: progressOpacity.value,
+  }));
 
   useEffect(() => {
     const handler = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (editing) {
-        setEditing(false);
-        return true;
-      }
+      if (editing) { setEditing(false); return true; }
       if (showTabs) { setShowTabs(false); return true; }
       if (showMenu) { setShowMenu(false); return true; }
       if (showFind) { setShowFind(false); return true; }
       if (dlDialog.visible) { setDlDialog((d) => ({ ...d, visible: false })); return true; }
-      if (canGoBack) {
-        issueCommand("goBack");
-        return true;
-      }
+      if (canGoBack) { issueCommand("goBack"); return true; }
       return false;
     });
     return () => handler.remove();
   }, [canGoBack, issueCommand, editing, showTabs, showMenu, showFind, dlDialog.visible]);
 
+  const { getSearchUrl } = useSettings();
   function startEditing() {
     setInputText(isHome ? "" : url);
     setEditing(true);
     setTimeout(() => inputRef.current?.focus(), 50);
   }
-
   function submitUrl() {
     const searchBase = getSearchUrl("").split("?")[0];
     const resolved = normalizeUrl(inputText.trim(), searchBase);
@@ -423,7 +476,6 @@ export default function BrowserScreen() {
   function handleDownloadRequest(dlUrl: string, dlFilename: string, referer: string) {
     setDlDialog({ visible: true, url: dlUrl, filename: dlFilename, referer });
   }
-
   function confirmDownload(filename: string, threads: number) {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     startDownload(dlDialog.url, filename, undefined, threads, dlDialog.referer);
@@ -431,19 +483,13 @@ export default function BrowserScreen() {
   }
 
   const barBg = isIncognito ? colors.incognito : colors.toolbar;
-  const urlBarBg = isIncognito ? colors.muted : colors.urlBar;
 
   return (
-    <View
-      style={[
-        styles.container,
-        {
-          backgroundColor: isIncognito ? colors.incognito : colors.background,
-          paddingTop: insets.top,
-        },
-      ]}
-    >
-      {/* WebViews — full remaining space */}
+    <View style={[styles.container, { backgroundColor: isIncognito ? colors.incognito : colors.background }]}>
+      {/* Status bar spacer */}
+      <View style={{ height: insets.top, backgroundColor: barBg }} />
+
+      {/* WebViews */}
       <View style={styles.webviewsContainer}>
         {tabs.map((tab) => (
           <BrowserWebView
@@ -455,45 +501,41 @@ export default function BrowserScreen() {
         ))}
       </View>
 
-      {/* Find in page */}
-      <FindInPage
-        visible={showFind}
-        onClose={() => setShowFind(false)}
-        onFind={() => {}}
-      />
+      <FindInPage visible={showFind} onClose={() => setShowFind(false)} onFind={() => {}} />
 
-      {/* ───── Bottom Chrome Bar ───── */}
+      {/* ── Bottom Chrome Bar ── */}
       <View
         style={[
-          styles.bottomBar,
+          styles.bottomChrome,
           {
             backgroundColor: barBg,
             borderTopColor: colors.border,
-            paddingBottom: Math.max(insets.bottom, 8),
+            paddingBottom: Math.max(insets.bottom, 10),
+            shadowColor: "#000",
           },
         ]}
       >
-        {/* Loading progress stripe */}
-        {isLoading && (
-          <View style={[styles.progressTrack, { backgroundColor: colors.muted }]}>
-            <View
-              style={[
-                styles.progressFill,
-                {
-                  backgroundColor: colors.progressBar,
-                  width: `${Math.round(progress * 100)}%`,
-                },
-              ]}
-            />
-          </View>
-        )}
+        {/* Loading progress bar */}
+        <Animated.View
+          style={[
+            styles.progressBar,
+            progressBarStyle,
+            { backgroundColor: proxyActive ? "#22C55E" : colors.primary },
+          ]}
+        />
 
         {editing ? (
-          /* ── Inline URL edit mode ── */
+          /* ── URL Edit mode ── */
           <View style={styles.editRow}>
+            <Ionicons
+              name="search"
+              size={16}
+              color={colors.mutedForeground}
+              style={styles.editSearchIcon}
+            />
             <TextInput
               ref={inputRef}
-              style={[styles.editInput, { backgroundColor: urlBarBg, color: colors.foreground }]}
+              style={[styles.editInput, { color: colors.foreground }]}
               value={inputText}
               onChangeText={setInputText}
               onSubmitEditing={submitUrl}
@@ -504,64 +546,77 @@ export default function BrowserScreen() {
               returnKeyType="go"
               selectTextOnFocus
               placeholderTextColor={colors.mutedForeground}
-              placeholder="Search or enter URL..."
+              placeholder="Search or enter URL"
             />
-            <TouchableOpacity
-              style={[styles.editCancel, { backgroundColor: colors.muted }]}
-              onPress={() => setEditing(false)}
-            >
+            {inputText.length > 0 && (
+              <TouchableOpacity onPress={() => setInputText("")} style={styles.editClear}>
+                <Ionicons name="close-circle" size={17} color={colors.mutedForeground} />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={[styles.editCancelBtn, { backgroundColor: colors.muted }]} onPress={() => setEditing(false)}>
               <Text style={[styles.editCancelText, { color: colors.foreground }]}>Cancel</Text>
             </TouchableOpacity>
           </View>
         ) : (
-          /* ── Normal toolbar row ── */
-          <View style={styles.toolbarRow}>
+          /* ── Normal Toolbar ── */
+          <View style={styles.toolbar}>
             {/* Back */}
-            <TouchableOpacity
-              style={styles.toolbarBtn}
+            <RippleBtn
+              style={styles.iconBtn}
               onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); issueCommand("goBack"); }}
               disabled={!canGoBack}
-              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
             >
-              <Ionicons name="chevron-back" size={26} color={canGoBack ? colors.foreground : colors.mutedForeground + "60"} />
-            </TouchableOpacity>
+              <Ionicons
+                name="chevron-back"
+                size={26}
+                color={canGoBack ? colors.foreground : colors.mutedForeground + "40"}
+              />
+            </RippleBtn>
 
             {/* Forward */}
-            <TouchableOpacity
-              style={styles.toolbarBtn}
+            <RippleBtn
+              style={styles.iconBtn}
               onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); issueCommand("goForward"); }}
               disabled={!canGoForward}
-              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
             >
-              <Ionicons name="chevron-forward" size={26} color={canGoForward ? colors.foreground : colors.mutedForeground + "60"} />
-            </TouchableOpacity>
+              <Ionicons
+                name="chevron-forward"
+                size={26}
+                color={canGoForward ? colors.foreground : colors.mutedForeground + "40"}
+              />
+            </RippleBtn>
 
-            {/* URL Bar (middle) */}
+            {/* URL Pill */}
             <TouchableOpacity
-              style={[styles.urlBar, { backgroundColor: urlBarBg }]}
+              style={[styles.urlPill, { backgroundColor: isIncognito ? colors.muted : colors.urlBar }]}
               onPress={startEditing}
-              activeOpacity={0.8}
+              onLongPress={() => {
+                if (!isHome) {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  startEditing();
+                }
+              }}
+              activeOpacity={0.75}
             >
               {!isHome && (
                 <Ionicons
                   name={secure ? "lock-closed" : "warning-outline"}
-                  size={11}
+                  size={12}
                   color={secure ? "#22C55E" : "#F59E0B"}
-                  style={{ marginRight: 4 }}
+                  style={{ marginRight: 5 }}
                 />
               )}
               {isIncognito && (
-                <Ionicons name="glasses" size={13} color={colors.incognitoForeground} style={{ marginRight: 3 }} />
+                <Ionicons name="glasses" size={14} color={colors.incognitoForeground} style={{ marginRight: 4 }} />
+              )}
+              {isDesktop && (
+                <Ionicons name="desktop-outline" size={12} color={colors.primary} style={{ marginRight: 4 }} />
               )}
               <Text
                 style={[
                   styles.urlText,
                   {
-                    color: isHome
-                      ? colors.mutedForeground
-                      : isIncognito
-                      ? colors.incognitoForeground
-                      : colors.foreground,
+                    color: isHome ? colors.mutedForeground : isIncognito ? colors.incognitoForeground : colors.foreground,
                     fontStyle: isHome ? "italic" : "normal",
                   },
                 ]}
@@ -569,30 +624,45 @@ export default function BrowserScreen() {
               >
                 {isHome ? "Search or type a URL" : displayUrl}
               </Text>
-              {isLoading && (
-                <View style={[styles.urlLoadingDot, { backgroundColor: colors.primary }]} />
-              )}
             </TouchableOpacity>
 
-            {/* Tabs switcher */}
+            {/* Desktop / Mobile toggle */}
             <TouchableOpacity
-              style={[styles.tabsBtn, { borderColor: isIncognito ? colors.incognitoForeground : colors.foreground }]}
+              style={[
+                styles.iconBtn,
+                isDesktop && { backgroundColor: colors.primary + "18", borderRadius: 10 },
+              ]}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                updateSetting("desktopMode", !isDesktop);
+              }}
+              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+            >
+              <Ionicons
+                name={isDesktop ? "desktop" : "phone-portrait-outline"}
+                size={20}
+                color={isDesktop ? colors.primary : colors.mutedForeground}
+              />
+            </TouchableOpacity>
+
+            {/* Tab count */}
+            <TouchableOpacity
+              style={[styles.tabCountBtn, { borderColor: isIncognito ? colors.incognitoForeground : colors.foreground }]}
               onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setShowTabs(true); }}
               hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
             >
-              <Text style={[styles.tabsCount, { color: isIncognito ? colors.incognitoForeground : colors.foreground }]}>
+              <Text style={[styles.tabCountText, { color: isIncognito ? colors.incognitoForeground : colors.foreground }]}>
                 {tabCount > 99 ? "99+" : tabCount}
               </Text>
             </TouchableOpacity>
 
             {/* Menu */}
-            <TouchableOpacity
-              style={styles.toolbarBtn}
+            <RippleBtn
+              style={styles.iconBtn}
               onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setShowMenu(true); }}
-              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
             >
               <Ionicons name="ellipsis-vertical" size={22} color={colors.foreground} />
-            </TouchableOpacity>
+            </RippleBtn>
           </View>
         )}
       </View>
@@ -602,13 +672,9 @@ export default function BrowserScreen() {
       <MenuSheet
         visible={showMenu}
         onClose={() => setShowMenu(false)}
-        onFindInPage={() => {
-          setShowMenu(false);
-          setTimeout(() => setShowFind(true), 300);
-        }}
+        onFindInPage={() => { setShowMenu(false); setTimeout(() => setShowFind(true), 300); }}
       />
 
-      {/* Download dialog */}
       <DownloadDialog
         visible={dlDialog.visible}
         url={dlDialog.url}
@@ -624,100 +690,96 @@ export default function BrowserScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   webviewsContainer: { flex: 1, position: "relative" },
-  webviewContainer: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
-  webview: { flex: 1 },
+  webviewContainer: { position: "absolute", inset: 0 },
+  webview: { flex: 1, backgroundColor: "#fff" },
 
-  errorView: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    padding: 40,
-  },
-  errorTitle: { fontSize: 18, fontWeight: "700", fontFamily: "Inter_700Bold" },
-  errorSub: { fontSize: 14, textAlign: "center" },
+  errorView: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 40 },
+  errorTitle: { fontSize: 20, fontWeight: "700", fontFamily: "Inter_700Bold" },
+  errorBody: { fontSize: 14, textAlign: "center", lineHeight: 20 },
 
-  /* Bottom Chrome bar */
-  bottomBar: {
+  /* Bottom chrome */
+  bottomChrome: {
     borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: 4,
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 12,
   },
-  progressTrack: {
-    height: 2,
-    width: "100%",
-    marginBottom: 2,
+  progressBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    height: 2.5,
+    borderRadius: 2,
   },
-  progressFill: {
-    height: 2,
-  },
-  toolbarRow: {
+  toolbar: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 6,
-    paddingVertical: 6,
-    gap: 2,
+    paddingHorizontal: 4,
+    paddingTop: 8,
+    paddingBottom: 4,
+    gap: 0,
   },
-  toolbarBtn: {
-    width: 40,
-    height: 42,
+  iconBtn: {
+    width: 42,
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
   },
-  urlBar: {
+  urlPill: {
     flex: 1,
-    height: 38,
-    borderRadius: 20,
-    paddingHorizontal: 12,
+    height: 40,
+    borderRadius: 22,
+    paddingHorizontal: 14,
     flexDirection: "row",
     alignItems: "center",
-    marginHorizontal: 4,
+    marginHorizontal: 2,
   },
   urlText: {
     fontSize: 14,
     flex: 1,
-    fontFamily: "Inter_500Medium",
+    fontFamily: "Inter_400Regular",
+    letterSpacing: 0.1,
   },
-  urlLoadingDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginLeft: 4,
-  },
-  tabsBtn: {
+  tabCountBtn: {
     width: 28,
-    height: 22,
-    borderRadius: 5,
-    borderWidth: 1.5,
+    height: 24,
+    borderRadius: 6,
+    borderWidth: 2,
     alignItems: "center",
     justifyContent: "center",
-    marginHorizontal: 4,
+    marginHorizontal: 3,
   },
-  tabsCount: {
+  tabCountText: {
     fontSize: 11,
     fontWeight: "700",
     fontFamily: "Inter_700Bold",
+    lineHeight: 13,
   },
 
-  /* Editing mode */
+  /* URL edit */
   editRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 4,
+    gap: 6,
   },
+  editSearchIcon: { marginRight: 2 },
   editInput: {
     flex: 1,
-    height: 40,
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    fontSize: 14,
+    height: 42,
+    fontSize: 15,
     fontFamily: "Inter_400Regular",
+    padding: 0,
+    margin: 0,
   },
-  editCancel: {
+  editClear: { padding: 4 },
+  editCancelBtn: {
     paddingHorizontal: 14,
-    height: 40,
-    borderRadius: 20,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -730,89 +792,127 @@ const styles = StyleSheet.create({
   /* Download dialog */
   dlOverlay: {
     flex: 1,
-    backgroundColor: "#00000060",
+    backgroundColor: "rgba(0,0,0,0.55)",
     justifyContent: "flex-end",
   },
   dlSheet: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    paddingBottom: 32,
-    gap: 12,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 12,
+    paddingHorizontal: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 16,
+    elevation: 24,
   },
   dlHandle: {
-    width: 36,
+    width: 40,
     height: 4,
     borderRadius: 2,
     alignSelf: "center",
-    marginBottom: 4,
+    marginBottom: 16,
   },
-  dlHeader: {
+  dlHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 14,
+    marginBottom: 20,
   },
+  dlFileIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dlHeaderText: { flex: 1 },
   dlTitle: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: "700",
     fontFamily: "Inter_700Bold",
+    marginBottom: 4,
   },
-  dlUrl: {
-    fontSize: 12,
-    marginTop: -4,
-  },
-  dlLabel: {
-    fontSize: 12,
-    fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
+  dlSubtitle: { fontSize: 12 },
+  dlSection: { marginBottom: 18 },
+  dlSectionLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    marginBottom: 8,
   },
   dlInput: {
-    height: 44,
-    borderRadius: 10,
+    height: 46,
+    borderRadius: 12,
     borderWidth: 1,
     paddingHorizontal: 14,
     fontSize: 14,
+    fontFamily: "Inter_400Regular",
   },
-  dlThreadRow: {
+  dlSegment: {
     flexDirection: "row",
-    gap: 10,
+    borderRadius: 14,
+    padding: 4,
+    gap: 4,
   },
-  dlThreadBtn: {
+  dlSegmentBtn: {
     flex: 1,
     height: 52,
     borderRadius: 10,
-    borderWidth: 1.5,
     alignItems: "center",
     justifyContent: "center",
     gap: 2,
   },
-  dlThreadLabel: {
-    fontSize: 15,
-    fontWeight: "700",
+  dlSegmentLabel: {
+    fontSize: 16,
+    fontWeight: "800",
     fontFamily: "Inter_700Bold",
   },
-  dlThreadSub: {
-    fontSize: 10,
-    fontWeight: "500",
+  dlRecBadge: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  dlRecText: {
+    fontSize: 8,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+  dlThreadHint: {
+    fontSize: 11,
+    marginTop: 8,
+    textAlign: "center",
   },
   dlActions: {
     flexDirection: "row",
     gap: 10,
-    marginTop: 4,
+    marginBottom: 4,
   },
-  dlBtn: {
+  dlCancelBtn: {
+    width: 100,
+    height: 50,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dlCancelText: {
+    fontSize: 15,
+    fontWeight: "600",
+    fontFamily: "Inter_600SemiBold",
+  },
+  dlConfirmBtn: {
     flex: 1,
-    height: 48,
-    borderRadius: 12,
+    height: 50,
+    borderRadius: 14,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
+    gap: 8,
   },
-  dlBtnText: {
-    fontSize: 15,
+  dlConfirmText: {
+    fontSize: 16,
     fontWeight: "700",
     fontFamily: "Inter_700Bold",
+    color: "#fff",
   },
 });
