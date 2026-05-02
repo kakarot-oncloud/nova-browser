@@ -7,9 +7,9 @@
     "icon": "./assets/images/icon.png",
     "scheme": "novabrowser",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
-      "image": "./assets/images/icon.png",
+      "image": "./assets/images/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#0D0D1C"
     },
@@ -37,18 +37,24 @@
       "favicon": "./assets/images/icon.png"
     },
     "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-web-browser",
       [
-        "expo-router",
+        "expo-image-picker",
         {
-          "origin": "https://replit.com/"
+          "photosPermission": "Allow Nova Browser to access your photos."
         }
       ],
-      "expo-font",
-      "expo-web-browser"
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow Nova Browser to use your location for geo-spoofing."
+        }
+      ]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "eas": {
