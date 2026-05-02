@@ -89,10 +89,12 @@ export function formatEta(seconds: number): string {
   return Math.floor(seconds / 3600) + "h " + Math.floor((seconds % 3600) / 60) + "m";
 }
 
+const CHROME_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36";
+
 interface DownloadsContextValue {
   downloads: Download[];
   activeCount: number;
-  startDownload: (url: string, filename: string, mimeType?: string, threads?: number) => Promise<void>;
+  startDownload: (url: string, filename: string, mimeType?: string, threads?: number, referer?: string) => Promise<void>;
   pauseDownload: (id: string) => void;
   resumeDownload: (id: string) => Promise<void>;
   cancelDownload: (id: string) => void;
@@ -102,10 +104,10 @@ interface DownloadsContextValue {
 }
 
 const DownloadsContext = createContext<DownloadsContextValue | null>(null);
-const STORAGE_KEY = "@nova_downloads_v2";
+const STORAGE_KEY = "@nova_downloads_v3";
 const genId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
 
-const downloadTasks = new Map<string, FileSystem.DownloadResumable>();
+const downloadTasks = new Map<string, any>();
 const speedTrackers = new Map<string, { lastBytes: number; lastTime: number }>();
 
 export function DownloadsProvider({ children }: { children: React.ReactNode }) {
@@ -139,7 +141,13 @@ export function DownloadsProvider({ children }: { children: React.ReactNode }) {
     });
   }, [persist]);
 
-  const startDownload = useCallback(async (url: string, filename: string, mimeType?: string, threads = 4): Promise<void> => {
+  const startDownload = useCallback(async (
+    url: string,
+    filename: string,
+    mimeType?: string,
+    threads = 4,
+    referer?: string
+  ): Promise<void> => {
     const id = genId();
     const dir = FileSystem.documentDirectory + "nova_downloads/";
     try {
@@ -147,11 +155,12 @@ export function DownloadsProvider({ children }: { children: React.ReactNode }) {
       if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
     } catch {}
 
-    const localPath = dir + filename;
-    const category = detectCategory(filename, mimeType);
+    const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, "_") || "download_" + Date.now();
+    const localPath = dir + safeFilename;
+    const category = detectCategory(safeFilename, mimeType);
 
     const newDownload: Download = {
-      id, url, filename, category,
+      id, url, filename: safeFilename, category,
       downloadedBytes: 0, progress: 0,
       status: "downloading", localPath,
       startedAt: Date.now(),
@@ -168,11 +177,20 @@ export function DownloadsProvider({ children }: { children: React.ReactNode }) {
 
     speedTrackers.set(id, { lastBytes: 0, lastTime: Date.now() });
 
+    const headers: Record<string, string> = {
+      "User-Agent": CHROME_UA,
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+    };
+    if (referer) {
+      headers["Referer"] = referer;
+    }
+
     try {
       const task = FileSystem.createDownloadResumable(
         url,
         localPath,
-        {},
+        { headers },
         (prog) => {
           const downloaded = prog.totalBytesWritten;
           const total = prog.totalBytesExpectedToWrite;
@@ -218,13 +236,16 @@ export function DownloadsProvider({ children }: { children: React.ReactNode }) {
           speedBps: 0,
           etaSeconds: 0,
         });
+      } else {
+        updateDownload(id, { status: "failed", error: "Download returned no result", speedBps: 0, etaSeconds: 0 });
       }
     } catch (err: any) {
       speedTrackers.delete(id);
-      if (err?.message?.includes("cancelled") || err?.message?.includes("cancel")) {
+      const msg: string = err?.message ?? "Download failed";
+      if (msg.includes("cancelled") || msg.includes("cancel")) {
         updateDownload(id, { status: "cancelled", speedBps: 0, etaSeconds: 0 });
       } else {
-        updateDownload(id, { status: "failed", error: err?.message ?? "Download failed", speedBps: 0, etaSeconds: 0 });
+        updateDownload(id, { status: "failed", error: msg, speedBps: 0, etaSeconds: 0 });
       }
     } finally {
       downloadTasks.delete(id);
@@ -239,12 +260,17 @@ export function DownloadsProvider({ children }: { children: React.ReactNode }) {
   }, [updateDownload]);
 
   const resumeDownload = useCallback(async (id: string) => {
-    const dl = (await AsyncStorage.getItem(STORAGE_KEY)) ? JSON.parse(await AsyncStorage.getItem(STORAGE_KEY) || "[]").find((d: Download) => d.id === id) : null;
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    const all: Download[] = raw ? JSON.parse(raw) : [];
+    const dl = all.find((d) => d.id === id);
     if (!dl || !dl.localPath) return;
     updateDownload(id, { status: "downloading" });
     speedTrackers.set(id, { lastBytes: dl.downloadedBytes || 0, lastTime: Date.now() });
+
+    const headers: Record<string, string> = { "User-Agent": CHROME_UA };
+
     try {
-      const task = FileSystem.createDownloadResumable(dl.url, dl.localPath, {}, (prog) => {
+      const task = FileSystem.createDownloadResumable(dl.url, dl.localPath, { headers }, (prog) => {
         const downloaded = prog.totalBytesWritten;
         const total = prog.totalBytesExpectedToWrite;
         const progress = total > 0 ? downloaded / total : 0;
@@ -260,7 +286,11 @@ export function DownloadsProvider({ children }: { children: React.ReactNode }) {
             speedTrackers.set(id, { lastBytes: downloaded, lastTime: now });
           }
         }
-        setDownloads((prev) => prev.map((d) => d.id === id ? { ...d, downloadedBytes: downloaded, size: total > 0 ? total : d.size, progress, speedBps: speedBps || d.speedBps, etaSeconds: etaSeconds || d.etaSeconds } : d));
+        setDownloads((prev) => prev.map((d) => d.id === id ? {
+          ...d, downloadedBytes: downloaded,
+          size: total > 0 ? total : d.size, progress,
+          speedBps: speedBps || d.speedBps, etaSeconds: etaSeconds || d.etaSeconds,
+        } : d));
       });
       downloadTasks.set(id, task);
       const result = await task.downloadAsync();
@@ -305,13 +335,21 @@ export function DownloadsProvider({ children }: { children: React.ReactNode }) {
       Alert.alert("Not Ready", "Download is not complete yet.");
       return;
     }
-    Alert.alert("File Downloaded", `${download.filename}\n${formatBytes(download.size || 0)}\nSaved to: ${download.localPath}`);
+    Alert.alert(
+      "File Ready",
+      `${download.filename}\n${formatBytes(download.size || 0)}\nSaved to Downloads folder`,
+      [{ text: "OK" }]
+    );
   }, []);
 
   const activeCount = downloads.filter((d) => d.status === "downloading" || d.status === "paused").length;
 
   return (
-    <DownloadsContext.Provider value={{ downloads, activeCount, startDownload, pauseDownload, resumeDownload, cancelDownload, removeDownload, clearCompleted, openDownload }}>
+    <DownloadsContext.Provider value={{
+      downloads, activeCount, startDownload,
+      pauseDownload, resumeDownload, cancelDownload,
+      removeDownload, clearCompleted, openDownload,
+    }}>
       {children}
     </DownloadsContext.Provider>
   );

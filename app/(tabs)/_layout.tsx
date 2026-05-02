@@ -56,6 +56,7 @@ export default function TabLayout() {
         options={{
           headerShown: false,
           title: "Browser",
+          tabBarStyle: { display: "none" },
           tabBarIcon: ({ color, size }) => (
             <Ionicons name={proxyActive ? "shield" : "globe-outline"} size={size} color={proxyActive ? colors.primary : color} />
           ),
