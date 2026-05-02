@@ -18,13 +18,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
-          cache: npm
-
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
 
       - name: Install EAS CLI
         run: npm install -g eas-cli
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
 
       - name: Build Android APK
         run: eas build --platform android --profile preview --non-interactive
