@@ -11,6 +11,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  StatusBar,
   StyleSheet,
   Text,
   TextInput,
@@ -486,8 +487,15 @@ export default function BrowserScreen() {
 
   const barBg = isIncognito ? colors.incognito : colors.toolbar;
 
+  const isDark = colors.background === "#111111";
+
   return (
     <View style={[styles.container, { backgroundColor: isIncognito ? colors.incognito : colors.background }]}>
+      <StatusBar
+        backgroundColor={isIncognito ? colors.incognito : colors.toolbar}
+        barStyle={isIncognito || isDark ? "light-content" : "dark-content"}
+        translucent={false}
+      />
       {/* Status bar spacer */}
       <View style={{ height: insets.top, backgroundColor: barBg }} />
 
@@ -561,7 +569,7 @@ export default function BrowserScreen() {
             </TouchableOpacity>
           </View>
         ) : (
-          /* ── Normal Toolbar ── */
+          /* ── Normal Toolbar — exactly Chrome's 5-item layout ── */
           <View style={styles.toolbar}>
             {/* Back */}
             <RippleBtn
@@ -570,9 +578,9 @@ export default function BrowserScreen() {
               disabled={!canGoBack}
             >
               <Ionicons
-                name="chevron-back"
-                size={26}
-                color={canGoBack ? colors.foreground : colors.mutedForeground + "40"}
+                name="arrow-back"
+                size={24}
+                color={canGoBack ? colors.foreground : colors.foreground + "30"}
               />
             </RippleBtn>
 
@@ -583,78 +591,58 @@ export default function BrowserScreen() {
               disabled={!canGoForward}
             >
               <Ionicons
-                name="chevron-forward"
-                size={26}
-                color={canGoForward ? colors.foreground : colors.mutedForeground + "40"}
+                name="arrow-forward"
+                size={24}
+                color={canGoForward ? colors.foreground : colors.foreground + "30"}
               />
             </RippleBtn>
 
             {/* URL Pill */}
             <TouchableOpacity
-              style={[styles.urlPill, { backgroundColor: isIncognito ? colors.muted : colors.urlBar }]}
+              style={[styles.urlPill, { backgroundColor: isIncognito ? "#2A2A3A" : colors.urlBar }]}
               onPress={startEditing}
-              onLongPress={() => {
-                if (!isHome) {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                  startEditing();
-                }
-              }}
-              activeOpacity={0.75}
+              activeOpacity={0.8}
             >
               {!isHome && (
                 <Ionicons
                   name={secure ? "lock-closed" : "warning-outline"}
-                  size={12}
-                  color={secure ? "#22C55E" : "#F59E0B"}
+                  size={11}
+                  color={secure ? "#34A853" : "#FBBC04"}
                   style={{ marginRight: 5 }}
                 />
               )}
               {isIncognito && (
-                <Ionicons name="glasses" size={14} color={colors.incognitoForeground} style={{ marginRight: 4 }} />
-              )}
-              {isDesktop && (
-                <Ionicons name="desktop-outline" size={12} color={colors.primary} style={{ marginRight: 4 }} />
+                <Ionicons name="glasses" size={13} color="#C8C8FF" style={{ marginRight: 4 }} />
               )}
               <Text
                 style={[
                   styles.urlText,
                   {
-                    color: isHome ? colors.mutedForeground : isIncognito ? colors.incognitoForeground : colors.foreground,
-                    fontStyle: isHome ? "italic" : "normal",
+                    color: isHome
+                      ? colors.mutedForeground
+                      : isIncognito
+                      ? "#D0D0FF"
+                      : colors.foreground,
                   },
                 ]}
                 numberOfLines={1}
               >
-                {isHome ? "Search or type a URL" : displayUrl}
+                {isHome ? "Search or type URL" : displayUrl}
               </Text>
+              {isLoading && (
+                <Ionicons name="sync" size={13} color={colors.primary} style={{ marginLeft: 4 }} />
+              )}
             </TouchableOpacity>
 
-            {/* Desktop / Mobile toggle */}
+            {/* Tab count — Chrome's square style */}
             <TouchableOpacity
-              style={[
-                styles.iconBtn,
-                isDesktop && { backgroundColor: colors.primary + "18", borderRadius: 10 },
-              ]}
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                updateSetting("desktopMode", !isDesktop);
-              }}
-              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
-            >
-              <Ionicons
-                name={isDesktop ? "desktop" : "phone-portrait-outline"}
-                size={20}
-                color={isDesktop ? colors.primary : colors.mutedForeground}
-              />
-            </TouchableOpacity>
-
-            {/* Tab count */}
-            <TouchableOpacity
-              style={[styles.tabCountBtn, { borderColor: isIncognito ? colors.incognitoForeground : colors.foreground }]}
+              style={[styles.tabCountBtn, {
+                borderColor: isIncognito ? "#C8C8FF" : colors.foreground,
+              }]}
               onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setShowTabs(true); }}
-              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
             >
-              <Text style={[styles.tabCountText, { color: isIncognito ? colors.incognitoForeground : colors.foreground }]}>
+              <Text style={[styles.tabCountText, { color: isIncognito ? "#C8C8FF" : colors.foreground }]}>
                 {tabCount > 99 ? "99+" : tabCount}
               </Text>
             </TouchableOpacity>
@@ -693,7 +681,7 @@ export default function BrowserScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   webviewsContainer: { flex: 1, position: "relative" },
-  webviewContainer: { position: "absolute", inset: 0 },
+  webviewContainer: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
   webview: { flex: 1, backgroundColor: "#fff" },
 
   errorView: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 40 },
